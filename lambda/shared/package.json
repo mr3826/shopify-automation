@@ -1,0 +1,27 @@
+{
+  "name": "shopify-automation-shared",
+  "version": "1.0.0",
+  "description": "Shared utilities for Shopify Automation Lambda functions",
+  "main": "utils.js",
+  "dependencies": {
+    "pg": "^8.11.3",
+    "crypto": "^1.0.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^6.3.3"
+  },
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  },
+  "keywords": [
+    "shopify",
+    "automation",
+    "lambda",
+    "serverless"
+  ],
+  "author": "Shopify Automation Team",
+  "license": "MIT"
+}

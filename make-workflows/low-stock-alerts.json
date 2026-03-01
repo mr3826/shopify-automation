@@ -1,0 +1,283 @@
+{
+  "name": "Low Stock Alerts & Reorder",
+  "description": "Monitors inventory levels and sends alerts/reorder requests when stock is low",
+  "version": "1.0",
+  "triggers": [
+    {
+      "type": "schedule",
+      "name": "Low Stock Check",
+      "config": {
+        "schedule": "0 */6 * * *",
+        "timezone": "UTC"
+      }
+    },
+    {
+      "type": "webhook",
+      "name": "Manual Check",
+      "config": {
+        "url": "/webhooks/low-stock/check",
+        "method": "POST"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "id": "1",
+      "name": "Query Low Stock Items",
+      "type": "database",
+      "config": {
+        "operation": "select",
+        "table": "inventory_summary",
+        "where": {
+          "stock_status": {
+            "operator": "IN",
+            "value": ["low_stock", "out_of_stock"]
+          }
+        }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Check if Items Found",
+      "type": "condition",
+      "config": {
+        "condition": "{{steps.1.output.length}} > 0"
+      }
+    },
+    {
+      "id": "3",
+      "name": "Group by Vendor",
+      "type": "group",
+      "config": {
+        "items": "{{steps.1.output}}",
+        "group_by": "vendor",
+        "condition": "{{steps.2.result}}"
+      }
+    },
+    {
+      "id": "4",
+      "name": "Send Slack Alerts",
+      "type": "foreach",
+      "config": {
+        "items": "{{steps.3.output}}",
+        "steps": [
+          {
+            "id": "4a",
+            "name": "Format Slack Message",
+            "type": "function",
+            "config": {
+              "function": "formatLowStockMessage",
+              "parameters": {
+                "vendor": "{{item.group}}",
+                "items": "{{item.items}}"
+              }
+            }
+          },
+          {
+            "id": "4b",
+            "name": "Send to Slack",
+            "type": "slack",
+            "config": {
+              "webhook_url": "{{env.SLACK_WEBHOOK_URL}}",
+              "message": "{{steps.4a.output}}",
+              "channel": "#inventory"
+            }
+          }
+        ],
+        "condition": "{{steps.2.result}}"
+      }
+    },
+    {
+      "id": "5",
+      "name": "Send Vendor Reorder Emails",
+      "type": "foreach",
+      "config": {
+        "items": "{{steps.3.output}}",
+        "steps": [
+          {
+            "id": "5a",
+            "name": "Get Vendor Contact Info",
+            "type": "database",
+            "config": {
+              "operation": "select",
+              "table": "vendors",
+              "where": {
+                "name": "{{item.group}}"
+              }
+            }
+          },
+          {
+            "id": "5b",
+            "name": "Send Reorder Email",
+            "type": "email",
+            "config": {
+              "provider": "sendgrid",
+              "to": "{{steps.5a.output[0].contact_email}}",
+              "cc": "{{env.PURCHASING_EMAIL}}",
+              "template": "vendor_reorder",
+              "subject": "Reorder Request - {{item.group}}",
+              "data": {
+                "vendor_name": "{{item.group}}",
+                "items": "{{item.items}}",
+                "contact_person": "{{steps.5a.output[0].contact_person}}",
+                "reorder_date": "{{now}}",
+                "urgent_items": "{{item.items | where:stock_status == 'out_of_stock'}}"
+              }
+            }
+          },
+          {
+            "id": "5c",
+            "name": "Log Reorder Email",
+            "type": "database",
+            "config": {
+              "operation": "insert",
+              "table": "email_logs",
+              "data": {
+                "customer_email": "{{steps.5a.output[0].contact_email}}",
+                "email_type": "vendor_reorder",
+                "template_name": "vendor_reorder_v1",
+                "subject": "Reorder Request - {{item.group}}",
+                "status": "sent",
+                "provider": "sendgrid",
+                "provider_message_id": "{{steps.5b.output.message_id}}"
+              }
+            }
+          }
+        ],
+        "condition": "{{steps.2.result}}"
+      }
+    },
+    {
+      "id": "6",
+      "name": "Update Inventory Status",
+      "type": "foreach",
+      "config": {
+        "items": "{{steps.1.output}}",
+        "steps": [
+          {
+            "id": "6a",
+            "name": "Mark as Reorder Requested",
+            "type": "database",
+            "config": {
+              "operation": "update",
+              "table": "inventory",
+              "where": {
+                "id": "{{item.id}}"
+              },
+              "data": {
+                "reorder_requested": true,
+                "reorder_requested_at": "{{now}}"
+              }
+            }
+          }
+        ],
+        "condition": "{{steps.2.result}}"
+      }
+    },
+    {
+      "id": "7",
+      "name": "Create Purchase Orders",
+      "type": "foreach",
+      "config": {
+        "items": "{{steps.3.output}}",
+        "steps": [
+          {
+            "id": "7a",
+            "name": "Generate PO Number",
+            "type": "function",
+            "config": {
+              "function": "generatePONumber",
+              "parameters": {
+                "vendor": "{{item.group}}"
+              }
+            }
+          },
+          {
+            "id": "7b",
+            "name": "Create Purchase Order",
+            "type": "database",
+            "config": {
+              "operation": "insert",
+              "table": "purchase_orders",
+              "data": {
+                "po_number": "{{steps.7a.output}}",
+                "vendor": "{{item.group}}",
+                "status": "pending_approval",
+                "total_amount": "{{item.items | sum:retail_price}}",
+                "created_at": "{{now}}",
+                "items": "{{item.items}}"
+              }
+            }
+          }
+        ],
+        "condition": "{{steps.2.result}} && {{env.AUTO_CREATE_PO}}"
+      }
+    },
+    {
+      "id": "8",
+      "name": "Send Internal Notification",
+      "type": "email",
+      "config": {
+        "provider": "sendgrid",
+        "to": "{{env.PURCHASING_EMAIL}}",
+        "subject": "Low Stock Alert - {{steps.1.output.length}} items need reordering",
+        "template": "internal_low_stock_alert",
+        "data": {
+          "total_items": "{{steps.1.output.length}}",
+          "out_of_stock": "{{steps.1.output | where:stock_status == 'out_of_stock' | length}}",
+          "low_stock": "{{steps.1.output | where:stock_status == 'low_stock' | length}}",
+          "vendors": "{{steps.3.output | map:group}}",
+          "dashboard_url": "{{env.DASHBOARD_URL}}/inventory?filter=low_stock"
+        },
+        "condition": "{{steps.2.result}}"
+      }
+    },
+    {
+      "id": "9",
+      "name": "Log Success",
+      "type": "database",
+      "config": {
+        "operation": "insert",
+        "table": "automation_logs",
+        "data": {
+          "scenario": "low-stock-alerts",
+          "trigger_type": "{{trigger.type}}",
+          "trigger_data": {
+            "items_checked": "{{steps.1.output.length}}",
+            "alerts_sent": "{{steps.2.result ? steps.3.output.length : 0}}"
+          },
+          "status": "success",
+          "message": "Low stock check completed. {{steps.1.output.length}} items checked, {{steps.2.result ? steps.3.output.length : 0}} alerts sent",
+          "correlation_id": "{{trigger.correlation_id}}"
+        }
+      }
+    }
+  ],
+  "error_handling": {
+    "retry_policy": {
+      "max_retries": 3,
+      "backoff_type": "exponential",
+      "base_delay": 1000
+    },
+    "dead_letter_queue": {
+      "enabled": true,
+      "queue_name": "low_stock_alerts_dlq"
+    }
+  },
+  "monitoring": {
+    "enabled": true,
+    "alerts": [
+      {
+        "type": "high_out_of_stock",
+        "threshold": 10,
+        "action": "slack_notification"
+      },
+      {
+        "type": "reorder_failure",
+        "threshold": 0.1,
+        "window": "1h",
+        "action": "slack_notification"
+      }
+    ]
+  }
+}

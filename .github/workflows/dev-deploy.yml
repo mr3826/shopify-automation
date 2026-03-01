@@ -1,0 +1,62 @@
+name: Deploy to Development
+
+on:
+  push:
+    branches: [ develop ]
+
+env:
+  AWS_REGION: ap-south-1
+  NODE_VERSION: 18
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install dependencies
+        run: |
+          cd api-server && npm ci --only=production
+          cd ../dashboard && npm ci
+
+      - name: Build dashboard
+        run: |
+          cd dashboard
+          npm run build
+
+      - name: Deploy API to dev environment
+        run: |
+          cd api-server
+          zip -r ../api-server-dev.zip . -x "*.git*" "node_modules/aws-sdk/*"
+          
+          # Deploy to development Elastic Beanstalk environment
+          aws elasticbeanstalk create-application-version \
+            --application-name shopify-automation-api \
+            --version-label "dev-$(date +%Y%m%d%H%M%S)" \
+            --source-bundle S3Bucket=shopify-automation-dev-deployments,S3Key=api-server-dev.zip \
+            --region ${{ env.AWS_REGION }}
+          
+          aws elasticbeanstalk update-environment \
+            --application-name shopify-automation-api \
+            --environment-name shopify-automation-api-dev \
+            --version-label "dev-$(date +%Y%m%d%H%M%S)" \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy dashboard to dev
+        run: |
+          cd dashboard
+          aws s3 sync dist/ s3://shopify-automation-dashboard-dev --delete

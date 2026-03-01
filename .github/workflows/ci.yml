@@ -1,0 +1,141 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop, feature/* ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  NODE_VERSION: 18
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          cd api-server && npm ci
+          cd ../dashboard && npm ci
+
+      - name: Run linting
+        run: |
+          npm run lint --if-present
+          cd api-server && npm run lint --if-present
+          cd ../dashboard && npm run lint --if-present
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          cd api-server && npm ci
+          cd ../dashboard && npm ci
+
+      - name: Run tests
+        run: |
+          npm test --if-present
+          cd api-server && npm test --if-present
+          cd ../dashboard && npm test --if-present
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          cd api-server && npm ci
+          cd ../dashboard && npm ci
+
+      - name: Build Lambda functions
+        run: |
+          cd lambda/order-router
+          npm ci --only=production
+          zip -r ../order-router.zip . -x "*.git*" "node_modules/aws-sdk/*"
+          
+          cd ../inventory-sync
+          npm ci --only=production
+          zip -r ../inventory-sync.zip . -x "*.git*" "node_modules/aws-sdk/*"
+          
+          cd ../chatbot
+          npm ci --only=production
+          zip -r ../chatbot.zip . -x "*.git*" "node_modules/aws-sdk/*"
+
+      - name: Build API server
+        run: |
+          cd api-server
+          npm ci --only=production
+          zip -r ../api-server-build.zip . -x "*.git*" "node_modules/aws-sdk/*"
+
+      - name: Build dashboard
+        run: |
+          cd dashboard
+          npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            lambda/*.zip
+            api-server-build.zip
+            dashboard/dist/
+          retention-days: 7
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run security scan
+        run: |
+          echo "Security scan placeholder - integrate with your security scanning tool"
+          # Example: npm audit --audit-level high
+
+  dependency-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Check for vulnerabilities
+        run: |
+          npm audit --audit-level high
+          cd api-server && npm audit --audit-level high
+          cd ../dashboard && npm audit --audit-level high

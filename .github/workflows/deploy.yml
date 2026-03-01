@@ -1,0 +1,202 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: ap-south-1
+  NODE_VERSION: 18
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          cd api-server && npm ci
+          cd ../dashboard && npm ci
+
+      - name: Run tests
+        run: |
+          npm test --if-present
+          cd api-server && npm test --if-present
+          cd ../dashboard && npm test --if-present
+
+      - name: Build dashboard
+        run: |
+          cd dashboard
+          npm run build
+
+  deploy-lambdas:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy Lambda functions
+        run: |
+          # Deploy order-router Lambda
+          cd lambda/order-router
+          npm ci --only=production
+          zip -r ../order-router.zip . -x "*.git*" "node_modules/aws-sdk/*"
+          aws lambda update-function-code \
+            --function-name shopify-automation-order-router \
+            --zip-file fileb://../order-router.zip \
+            --region ${{ env.AWS_REGION }}
+
+          # Deploy inventory-sync Lambda
+          cd ../inventory-sync
+          npm ci --only=production
+          zip -r ../inventory-sync.zip . -x "*.git*" "node_modules/aws-sdk/*"
+          aws lambda update-function-code \
+            --function-name shopify-inventory-sync \
+            --zip-file fileb://../inventory-sync.zip \
+            --region ${{ env.AWS_REGION }}
+
+          # Deploy chatbot Lambda
+          cd ../chatbot
+          npm ci --only=production
+          zip -r ../chatbot.zip . -x "*.git*" "node_modules/aws-sdk/*"
+          aws lambda update-function-code \
+            --function-name shopify-chatbot \
+            --zip-file fileb://../chatbot.zip \
+            --region ${{ env.AWS_REGION }}
+
+  deploy-api:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build and deploy API server
+        run: |
+          cd api-server
+          npm ci --only=production
+          
+          # Create deployment package
+          zip -r ../api-server-deployment.zip . -x "*.git*" "node_modules/aws-sdk/*"
+          
+          # Deploy to Elastic Beanstalk
+          aws elasticbeanstalk create-application-version \
+            --application-name shopify-automation-api \
+            --version-label "v$(date +%Y%m%d%H%M%S)" \
+            --source-bundle S3Bucket=shopify-automation-deployments,S3Key=api-server-deployment.zip \
+            --region ${{ env.AWS_REGION }}
+          
+          # Update environment
+          aws elasticbeanstalk update-environment \
+            --application-name shopify-automation-api \
+            --environment-name shopify-automation-api-env \
+            --version-label "v$(date +%Y%m%d%H%M%S)" \
+            --region ${{ env.AWS_REGION }}
+
+  deploy-dashboard:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build and deploy dashboard
+        run: |
+          cd dashboard
+          npm ci
+          npm run build
+          
+          # Deploy to S3
+          aws s3 sync dist/ s3://shopify-automation-dashboard --delete
+          
+          # Invalidate CloudFront cache
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+
+  setup-infrastructure:
+    needs: deploy-lambdas
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup DynamoDB tables
+        run: |
+          bash scripts/create-dynamodb-tables.sh
+
+      - name: Setup API Gateway
+        run: |
+          bash setup-api-gateway.sh
+
+  notify:
+    needs: [deploy-lambdas, deploy-api, deploy-dashboard]
+    runs-on: ubuntu-latest
+    if: always() && github.ref == 'refs/heads/main'
+    steps:
+      - name: Notify deployment status
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#deployments'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

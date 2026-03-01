@@ -1,0 +1,263 @@
+{
+  "name": "Order Capture & Processing",
+  "description": "Captures Shopify orders and processes them through the automation pipeline",
+  "version": "1.0",
+  "triggers": [
+    {
+      "type": "webhook",
+      "name": "Shopify Order Webhook",
+      "config": {
+        "url": "/webhooks/shopify/orders",
+        "method": "POST",
+        "headers": {
+          "X-Shopify-Topic": "orders/create"
+        }
+      }
+    }
+  ],
+  "steps": [
+    {
+      "id": "1",
+      "name": "Validate Webhook",
+      "type": "function",
+      "config": {
+        "function": "validateShopifyWebhook",
+        "parameters": {
+          "secret": "{{env.SHOPIFY_WEBHOOK_SECRET}}",
+          "body": "{{trigger.body}}",
+          "signature": "{{trigger.headers.X-Shopify-Hmac-Sha256}}"
+        }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Parse Order Data",
+      "type": "parser",
+      "config": {
+        "input": "{{steps.1.output}}",
+        "schema": "shopify_order"
+      }
+    },
+    {
+      "id": "3",
+      "name": "Check for Duplicate Order",
+      "type": "database",
+      "config": {
+        "operation": "select",
+        "table": "orders",
+        "where": {
+          "shopify_id": "{{steps.2.output.id}}"
+        }
+      }
+    },
+    {
+      "id": "4",
+      "name": "Route to Database",
+      "type": "router",
+      "config": {
+        "condition": "{{steps.3.output.length}} == 0",
+        "routes": [
+          {
+            "condition": true,
+            "steps": [
+              {
+                "id": "4a",
+                "name": "Insert Order",
+                "type": "database",
+                "config": {
+                  "operation": "insert",
+                  "table": "orders",
+                  "data": {
+                    "shopify_id": "{{steps.2.output.id}}",
+                    "order_number": "{{steps.2.output.order_number}}",
+                    "customer_email": "{{steps.2.output.email}}",
+                    "customer_first_name": "{{steps.2.output.customer.first_name}}",
+                    "customer_last_name": "{{steps.2.output.customer.last_name}}",
+                    "status": "{{steps.2.output.financial_status}}",
+                    "financial_status": "{{steps.2.output.financial_status}}",
+                    "fulfillment_status": "{{steps.2.output.fulfillment_status}}",
+                    "total_price": "{{steps.2.output.total_price}}",
+                    "subtotal_price": "{{steps.2.output.subtotal_price}}",
+                    "tax_price": "{{steps.2.output.total_tax}}",
+                    "shipping_price": "{{steps.2.output.total_shipping_price_set.shop_money.amount}}",
+                    "currency": "{{steps.2.output.currency}}",
+                    "shipping_address": "{{steps.2.output.shipping_address}}",
+                    "billing_address": "{{steps.2.output.billing_address}}",
+                    "notes": "{{steps.2.output.notes}}",
+                    "tags": "{{steps.2.output.tags}}",
+                    "processed_at": "{{steps.2.output.processed_at}}"
+                  }
+                }
+              },
+              {
+                "id": "4b",
+                "name": "Insert Order Items",
+                "type": "database",
+                "config": {
+                  "operation": "insert_batch",
+                  "table": "order_items",
+                  "data": "{{steps.2.output.line_items}}",
+                  "mapping": {
+                    "order_id": "{{steps.4a.output.id}}",
+                    "shopify_product_id": "{{item.product_id}}",
+                    "shopify_variant_id": "{{item.variant_id}}",
+                    "sku": "{{item.sku}}",
+                    "product_title": "{{item.title}}",
+                    "variant_title": "{{item.variant_title}}",
+                    "quantity": "{{item.quantity}}",
+                    "unit_price": "{{item.price}}",
+                    "total_price": "{{item.total_discount}}",
+                    "product_type": "{{item.product_type}}",
+                    "vendor": "{{item.vendor}}"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "condition": false,
+            "steps": [
+              {
+                "id": "4c",
+                "name": "Log Duplicate",
+                "type": "logger",
+                "config": {
+                  "level": "warn",
+                  "message": "Duplicate order detected: {{steps.2.output.id}}"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "5",
+      "name": "Update Inventory",
+      "type": "api",
+      "config": {
+        "url": "{{env.API_URL}}/inventory/update",
+        "method": "POST",
+        "headers": {
+          "Authorization": "Bearer {{env.API_TOKEN}}"
+        },
+        "body": {
+          "items": "{{steps.2.output.line_items}}",
+          "order_id": "{{steps.4a.output.id}}"
+        }
+      }
+    },
+    {
+      "id": "6",
+      "name": "Send Order Confirmation",
+      "type": "email",
+      "config": {
+        "provider": "sendgrid",
+        "to": "{{steps.2.output.email}}",
+        "template": "order_confirmation",
+        "data": {
+          "order_number": "{{steps.2.output.order_number}}",
+          "customer_name": "{{steps.2.output.customer.first_name}}",
+          "items": "{{steps.2.output.line_items}}",
+          "total": "{{steps.2.output.total_price}}",
+          "shipping_address": "{{steps.2.output.shipping_address}}"
+        }
+      }
+    },
+    {
+      "id": "7",
+      "name": "Route to Fulfillment",
+      "type": "router",
+      "config": {
+        "condition": "{{steps.2.output.financial_status}} == 'paid'",
+        "routes": [
+          {
+            "condition": true,
+            "steps": [
+              {
+                "id": "7a",
+                "name": "Send to ShipStation",
+                "type": "api",
+                "config": {
+                  "url": "{{env.SHIPSTATION_API_URL}}/orders/createorder",
+                  "method": "POST",
+                  "headers": {
+                    "Authorization": "Basic {{env.SHIPSTATION_AUTH}}"
+                  },
+                  "body": {
+                    "orderNumber": "{{steps.2.output.order_number}}",
+                    "orderDate": "{{steps.2.output.created_at}}",
+                    "orderStatus": "awaiting_shipment",
+                    "customerEmail": "{{steps.2.output.email}}",
+                    "billTo": {
+                      "name": "{{steps.2.output.customer.first_name}} {{steps.2.output.customer.last_name}}",
+                      "street": "{{steps.2.output.billing_address.address1}}",
+                      "city": "{{steps.2.output.billing_address.city}}",
+                      "state": "{{steps.2.output.billing_address.province}}",
+                      "postalCode": "{{steps.2.output.billing_address.zip}}",
+                      "country": "{{steps.2.output.billing_address.country}}"
+                    },
+                    "shipTo": {
+                      "name": "{{steps.2.output.shipping_address.name}}",
+                      "street": "{{steps.2.output.shipping_address.address1}}",
+                      "city": "{{steps.2.output.shipping_address.city}}",
+                      "state": "{{steps.2.output.shipping_address.province}}",
+                      "postalCode": "{{steps.2.output.shipping_address.zip}}",
+                      "country": "{{steps.2.output.shipping_address.country}}"
+                    },
+                    "items": "{{steps.2.output.line_items}}",
+                    "requestedShippingService": "ground"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "8",
+      "name": "Log Success",
+      "type": "database",
+      "config": {
+        "operation": "insert",
+        "table": "automation_logs",
+        "data": {
+          "scenario": "order-capture",
+          "trigger_type": "webhook",
+          "trigger_data": "{{steps.2.output}}",
+          "status": "success",
+          "message": "Order {{steps.2.output.order_number}} processed successfully",
+          "correlation_id": "{{trigger.correlation_id}}"
+        }
+      }
+    }
+  ],
+  "error_handling": {
+    "retry_policy": {
+      "max_retries": 3,
+      "backoff_type": "exponential",
+      "base_delay": 1000
+    },
+    "dead_letter_queue": {
+      "enabled": true,
+      "queue_name": "order_processing_dlq"
+    }
+  },
+  "monitoring": {
+    "enabled": true,
+    "alerts": [
+      {
+        "type": "failure_rate",
+        "threshold": 0.1,
+        "window": "5m",
+        "action": "slack_notification"
+      },
+      {
+        "type": "processing_time",
+        "threshold": 30000,
+        "action": "slack_notification"
+      }
+    ]
+  }
+}

@@ -1,0 +1,305 @@
+{
+  "name": "Multi-Channel Inventory Sync",
+  "description": "Synchronizes inventory levels across Shopify, Amazon, and eBay",
+  "version": "1.0",
+  "triggers": [
+    {
+      "type": "webhook",
+      "name": "Shopify Inventory Webhook",
+      "config": {
+        "url": "/webhooks/shopify/inventory",
+        "method": "POST",
+        "headers": {
+          "X-Shopify-Topic": "inventory_levels/update"
+        }
+      }
+    },
+    {
+      "type": "schedule",
+      "name": "Scheduled Sync",
+      "config": {
+        "schedule": "0 */6 * * *",
+        "timezone": "UTC"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "id": "1",
+      "name": "Validate Webhook",
+      "type": "function",
+      "config": {
+        "function": "validateShopifyWebhook",
+        "parameters": {
+          "secret": "{{env.SHOPIFY_WEBHOOK_SECRET}}",
+          "body": "{{trigger.body}}",
+          "signature": "{{trigger.headers.X-Shopify-Hmac-Sha256}}"
+        }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Parse Inventory Data",
+      "type": "parser",
+      "config": {
+        "input": "{{steps.1.output}}",
+        "schema": "shopify_inventory"
+      }
+    },
+    {
+      "id": "3",
+      "name": "Get Product Details",
+      "type": "api",
+      "config": {
+        "url": "https://{{env.SHOPIFY_SHOP_DOMAIN}}/admin/api/2023-10/inventory_items/{{steps.2.output.inventory_item_id}}.json",
+        "method": "GET",
+        "headers": {
+          "X-Shopify-Access-Token": "{{env.SHOPIFY_API_PASSWORD}}"
+        }
+      }
+    },
+    {
+      "id": "4",
+      "name": "Update Master Inventory",
+      "type": "database",
+      "config": {
+        "operation": "upsert",
+        "table": "inventory",
+        "conflict_columns": ["shopify_variant_id"],
+        "data": {
+          "sku": "{{steps.3.output.inventory_item.sku}}",
+          "product_name": "{{steps.3.output.inventory_item.title}}",
+          "product_title": "{{steps.3.output.inventory_item.title}}",
+          "variant_title": "{{steps.3.output.inventory_item.variant_title}}",
+          "shopify_product_id": "{{steps.3.output.inventory_item.product_id}}",
+          "shopify_variant_id": "{{steps.3.output.inventory_item.id}}",
+          "stock_quantity": "{{steps.2.output.available}}",
+          "cost_price": "{{steps.3.output.inventory_item.cost}}",
+          "retail_price": "{{steps.3.output.inventory_item.price}}",
+          "weight": "{{steps.3.output.inventory_item.weight}}",
+          "product_type": "{{steps.3.output.inventory_item.product_type}}",
+          "vendor": "{{steps.3.output.inventory_item.vendor}}",
+          "last_synced_at": "{{now}}"
+        }
+      }
+    },
+    {
+      "id": "5",
+      "name": "Update Shopify Levels",
+      "type": "database",
+      "config": {
+        "operation": "upsert",
+        "table": "inventory_levels",
+        "conflict_columns": ["inventory_id", "channel", "location_id"],
+        "data": {
+          "inventory_id": "{{steps.4.output.id}}",
+          "channel": "shopify",
+          "location_id": "{{steps.2.output.location_id}}",
+          "available": "{{steps.2.output.available}}",
+          "last_synced_at": "{{now}}"
+        }
+      }
+    },
+    {
+      "id": "6",
+      "name": "Sync to Amazon",
+      "type": "api",
+      "config": {
+        "url": "{{env.AMAZON_API_URL}}/inventory/update",
+        "method": "POST",
+        "headers": {
+          "Authorization": "Bearer {{env.AMAZON_API_TOKEN}}",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "sku": "{{steps.3.output.inventory_item.sku}}",
+          "quantity": "{{steps.2.output.available}}",
+          "fulfillment_center_id": "{{env.AMAZON_FULFILLMENT_CENTER}}"
+        },
+        "error_handling": {
+          "continue_on_error": true,
+          "log_error": true
+        }
+      }
+    },
+    {
+      "id": "7",
+      "name": "Update Amazon Levels",
+      "type": "database",
+      "config": {
+        "operation": "upsert",
+        "table": "inventory_levels",
+        "conflict_columns": ["inventory_id", "channel", "location_id"],
+        "data": {
+          "inventory_id": "{{steps.4.output.id}}",
+          "channel": "amazon",
+          "location_id": "US-WEST",
+          "available": "{{steps.2.output.available}}",
+          "last_synced_at": "{{now}}"
+        },
+        "condition": "{{steps.6.status}} == 'success'"
+      }
+    },
+    {
+      "id": "8",
+      "name": "Sync to eBay",
+      "type": "api",
+      "config": {
+        "url": "{{env.EBAY_API_URL}}/sell/inventory/v1/inventory_item",
+        "method": "PUT",
+        "headers": {
+          "Authorization": "Bearer {{env.EBAY_API_TOKEN}}",
+          "Content-Type": "application/json",
+          "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
+        },
+        "body": {
+          "sku": "{{steps.3.output.inventory_item.sku}}",
+          "shipToLocationAvailability": [
+            {
+              "quantity": "{{steps.2.output.available}}"
+            }
+          ]
+        },
+        "error_handling": {
+          "continue_on_error": true,
+          "log_error": true
+        }
+      }
+    },
+    {
+      "id": "9",
+      "name": "Update eBay Levels",
+      "type": "database",
+      "config": {
+        "operation": "upsert",
+        "table": "inventory_levels",
+        "conflict_columns": ["inventory_id", "channel", "location_id"],
+        "data": {
+          "inventory_id": "{{steps.4.output.id}}",
+          "channel": "ebay",
+          "location_id": "US",
+          "available": "{{steps.2.output.available}}",
+          "last_synced_at": "{{now}}"
+        },
+        "condition": "{{steps.8.status}} == 'success'"
+      }
+    },
+    {
+      "id": "10",
+      "name": "Check Low Stock",
+      "type": "condition",
+      "config": {
+        "condition": "{{steps.2.output.available}} <= {{steps.4.output.reorder_point}}"
+      }
+    },
+    {
+      "id": "11",
+      "name": "Send Low Stock Alert",
+      "type": "slack",
+      "config": {
+        "webhook_url": "{{env.SLACK_WEBHOOK_URL}}",
+        "message": {
+          "text": "🚨 Low Stock Alert",
+          "attachments": [
+            {
+              "color": "warning",
+              "fields": [
+                {
+                  "title": "SKU",
+                  "value": "{{steps.3.output.inventory_item.sku}}",
+                  "short": true
+                },
+                {
+                  "title": "Product",
+                  "value": "{{steps.3.output.inventory_item.title}}",
+                  "short": true
+                },
+                {
+                  "title": "Current Stock",
+                  "value": "{{steps.2.output.available}}",
+                  "short": true
+                },
+                {
+                  "title": "Reorder Point",
+                  "value": "{{steps.4.output.reorder_point}}",
+                  "short": true
+                }
+              ],
+              "actions": [
+                {
+                  "type": "button",
+                  "text": "View Inventory",
+                  "url": "{{env.DASHBOARD_URL}}/inventory?sku={{steps.3.output.inventory_item.sku}}"
+                }
+              ]
+            }
+          ]
+        },
+        "condition": "{{steps.10.result}}"
+      }
+    },
+    {
+      "id": "12",
+      "name": "Send Reorder Email",
+      "type": "email",
+      "config": {
+        "provider": "sendgrid",
+        "to": "{{env.SUPPLIER_EMAIL}}",
+        "template": "low_stock_reorder",
+        "data": {
+          "sku": "{{steps.3.output.inventory_item.sku}}",
+          "product_name": "{{steps.3.output.inventory_item.title}}",
+          "current_stock": "{{steps.2.output.available}}",
+          "reorder_point": "{{steps.4.output.reorder_point}}",
+          "suggested_order_quantity": "{{steps.4.output.max_stock}}",
+          "vendor": "{{steps.3.output.inventory_item.vendor}}"
+        },
+        "condition": "{{steps.10.result}}"
+      }
+    },
+    {
+      "id": "13",
+      "name": "Log Success",
+      "type": "database",
+      "config": {
+        "operation": "insert",
+        "table": "automation_logs",
+        "data": {
+          "scenario": "inventory-sync",
+          "trigger_type": "{{trigger.type}}",
+          "trigger_data": "{{steps.2.output}}",
+          "status": "success",
+          "message": "Inventory synced for SKU {{steps.3.output.inventory_item.sku}} across all channels",
+          "correlation_id": "{{trigger.correlation_id}}"
+        }
+      }
+    }
+  ],
+  "error_handling": {
+    "retry_policy": {
+      "max_retries": 3,
+      "backoff_type": "exponential",
+      "base_delay": 1000
+    },
+    "dead_letter_queue": {
+      "enabled": true,
+      "queue_name": "inventory_sync_dlq"
+    }
+  },
+  "monitoring": {
+    "enabled": true,
+    "alerts": [
+      {
+        "type": "sync_failure",
+        "threshold": 0.05,
+        "window": "1h",
+        "action": "slack_notification"
+      },
+      {
+        "type": "channel_lag",
+        "threshold": 300,
+        "action": "slack_notification"
+      }
+    ]
+  }
+}

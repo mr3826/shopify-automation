@@ -1,0 +1,28 @@
+{
+  "name": "shopify-inventory-sync",
+  "version": "1.0.0",
+  "description": "Lambda function for syncing inventory across multiple channels",
+  "main": "handler.js",
+  "dependencies": {
+    "pg": "^8.11.3",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "package": "zip -r inventory-sync.zip handler.js ../shared/",
+    "deploy": "aws lambda update-function-code --function-name shopify-inventory-sync --zip-file fileb://inventory-sync.zip"
+  },
+  "keywords": [
+    "shopify",
+    "inventory",
+    "sync",
+    "lambda",
+    "multi-channel"
+  ],
+  "author": "Shopify Automation Team",
+  "license": "MIT"
+}

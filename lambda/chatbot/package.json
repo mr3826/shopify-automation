@@ -1,0 +1,30 @@
+{
+  "name": "shopify-chatbot",
+  "version": "1.0.0",
+  "description": "Lambda function for ChatGPT-powered customer support chatbot",
+  "main": "handler.js",
+  "dependencies": {
+    "pg": "^8.11.3",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.20.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "package": "zip -r chatbot.zip handler.js ../shared/",
+    "deploy": "aws lambda update-function-code --function-name shopify-chatbot --zip-file fileb://chatbot.zip"
+  },
+  "keywords": [
+    "shopify",
+    "chatbot",
+    "openai",
+    "gpt",
+    "customer-support",
+    "lambda"
+  ],
+  "author": "Shopify Automation Team",
+  "license": "MIT"
+}

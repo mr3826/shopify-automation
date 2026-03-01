@@ -1,0 +1,296 @@
+{
+  "name": "Email Automation",
+  "description": "Automated email notifications for order lifecycle events",
+  "version": "1.0",
+  "triggers": [
+    {
+      "type": "webhook",
+      "name": "Order Created",
+      "config": {
+        "url": "/webhooks/email/order-created",
+        "method": "POST"
+      }
+    },
+    {
+      "type": "webhook",
+      "name": "Order Shipped",
+      "config": {
+        "url": "/webhooks/email/order-shipped",
+        "method": "POST"
+      }
+    },
+    {
+      "type": "schedule",
+      "name": "Follow-up Schedule",
+      "config": {
+        "schedule": "0 9 * * *",
+        "timezone": "UTC"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "id": "1",
+      "name": "Parse Event Data",
+      "type": "parser",
+      "config": {
+        "input": "{{trigger.body}}"
+      }
+    },
+    {
+      "id": "2",
+      "name": "Route by Event Type",
+      "type": "router",
+      "config": {
+        "routes": [
+          {
+            "condition": "{{trigger.type}} == 'order_created'",
+            "steps": [
+              {
+                "id": "2a",
+                "name": "Get Order Details",
+                "type": "database",
+                "config": {
+                  "operation": "select",
+                  "table": "order_summary",
+                  "where": {
+                    "shopify_id": "{{steps.1.output.order_id}}"
+                  },
+                  "joins": [
+                    {
+                      "table": "order_items",
+                      "on": "orders.id = order_items.order_id"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "2b",
+                "name": "Send Order Confirmation",
+                "type": "email",
+                "config": {
+                  "provider": "sendgrid",
+                  "to": "{{steps.2a.output[0].customer_email}}",
+                  "template": "order_confirmation",
+                  "subject": "Order Confirmation #{{steps.2a.output[0].order_number}}",
+                  "data": {
+                    "order_number": "{{steps.2a.output[0].order_number}}",
+                    "customer_name": "{{steps.2a.output[0].customer_first_name}}",
+                    "items": "{{steps.2a.output}}",
+                    "total": "{{steps.2a.output[0].total_price}}",
+                    "shipping_address": "{{steps.2a.output[0].shipping_address}}",
+                    "estimated_delivery": "{{date_add(days=3)}}"
+                  }
+                }
+              },
+              {
+                "id": "2c",
+                "name": "Log Email Sent",
+                "type": "database",
+                "config": {
+                  "operation": "insert",
+                  "table": "email_logs",
+                  "data": {
+                    "order_id": "{{steps.2a.output[0].id}}",
+                    "customer_email": "{{steps.2a.output[0].customer_email}}",
+                    "email_type": "order_confirmation",
+                    "template_name": "order_confirmation_v1",
+                    "subject": "Order Confirmation #{{steps.2a.output[0].order_number}}",
+                    "status": "sent",
+                    "provider": "sendgrid",
+                    "provider_message_id": "{{steps.2b.output.message_id}}"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "condition": "{{trigger.type}} == 'order_shipped'",
+            "steps": [
+              {
+                "id": "2d",
+                "name": "Get Order Details",
+                "type": "database",
+                "config": {
+                  "operation": "select",
+                  "table": "orders",
+                  "where": {
+                    "shopify_id": "{{steps.1.output.order_id}}"
+                  },
+                  "joins": [
+                    {
+                      "table": "fulfillments",
+                      "on": "orders.id = fulfillments.order_id"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "2e",
+                "name": "Send Shipping Notification",
+                "type": "email",
+                "config": {
+                  "provider": "sendgrid",
+                  "to": "{{steps.2d.output[0].customer_email}}",
+                  "template": "shipping_notification",
+                  "subject": "Your Order #{{steps.2d.output[0].order_number}} Has Shipped!",
+                  "data": {
+                    "order_number": "{{steps.2d.output[0].order_number}}",
+                    "customer_name": "{{steps.2d.output[0].customer_first_name}}",
+                    "tracking_number": "{{steps.2d.output[0].fulfillments[0].tracking_number}}",
+                    "tracking_company": "{{steps.2d.output[0].fulfillments[0].tracking_company}}",
+                    "tracking_url": "{{steps.2d.output[0].fulfillments[0].tracking_url}}",
+                    "estimated_delivery": "{{date_add(days=2)}}"
+                  }
+                }
+              },
+              {
+                "id": "2f",
+                "name": "Log Shipping Email",
+                "type": "database",
+                "config": {
+                  "operation": "insert",
+                  "table": "email_logs",
+                  "data": {
+                    "order_id": "{{steps.2d.output[0].id}}",
+                    "customer_email": "{{steps.2d.output[0].customer_email}}",
+                    "email_type": "shipping_update",
+                    "template_name": "shipping_update_v1",
+                    "subject": "Your Order #{{steps.2d.output[0].order_number}} Has Shipped!",
+                    "status": "sent",
+                    "provider": "sendgrid",
+                    "provider_message_id": "{{steps.2e.output.message_id}}"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "condition": "{{trigger.type}} == 'scheduled'",
+            "steps": [
+              {
+                "id": "2g",
+                "name": "Find Orders for Follow-up",
+                "type": "database",
+                "config": {
+                  "operation": "select",
+                  "table": "orders",
+                  "where": {
+                    "status": "fulfilled",
+                    "created_at": {
+                      "operator": ">=",
+                      "value": "{{date_subtract(days=3)}}"
+                    }
+                  },
+                  "having": {
+                    "created_at": {
+                      "operator": "<=",
+                      "value": "{{date_subtract(days=4)}}"
+                    }
+                  },
+                  "joins": [
+                    {
+                      "table": "email_logs",
+                      "on": "orders.id = email_logs.order_id AND email_logs.email_type != 'delivery_follow_up'"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "2h",
+                "name": "Send Follow-up Emails",
+                "type": "foreach",
+                "config": {
+                  "items": "{{steps.2g.output}}",
+                  "steps": [
+                    {
+                      "id": "2h-1",
+                      "name": "Send Follow-up Email",
+                      "type": "email",
+                      "config": {
+                        "provider": "sendgrid",
+                        "to": "{{item.customer_email}}",
+                        "template": "delivery_follow_up",
+                        "subject": "How was your recent order?",
+                        "data": {
+                          "order_number": "{{item.order_number}}",
+                          "customer_name": "{{item.customer_first_name}}",
+                          "items": "{{item.order_items}}",
+                          "support_email": "{{env.SUPPORT_EMAIL}}",
+                          "review_url": "{{env.SHOP_URL}}/review/{{item.order_number}}"
+                        }
+                      }
+                    },
+                    {
+                      "id": "2h-2",
+                      "name": "Log Follow-up Email",
+                      "type": "database",
+                      "config": {
+                        "operation": "insert",
+                        "table": "email_logs",
+                        "data": {
+                          "order_id": "{{item.id}}",
+                          "customer_email": "{{item.customer_email}}",
+                          "email_type": "delivery_follow_up",
+                          "template_name": "delivery_follow_up_v1",
+                          "subject": "How was your recent order?",
+                          "status": "sent",
+                          "provider": "sendgrid",
+                          "provider_message_id": "{{steps.2h-1.output.message_id}}"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "3",
+      "name": "Log Automation Success",
+      "type": "database",
+      "config": {
+        "operation": "insert",
+        "table": "automation_logs",
+        "data": {
+          "scenario": "email-automation",
+          "trigger_type": "{{trigger.type}}",
+          "trigger_data": "{{steps.1.output}}",
+          "status": "success",
+          "message": "Email automation completed for {{trigger.type}}",
+          "correlation_id": "{{trigger.correlation_id}}"
+        }
+      }
+    }
+  ],
+  "error_handling": {
+    "retry_policy": {
+      "max_retries": 3,
+      "backoff_type": "exponential",
+      "base_delay": 1000
+    },
+    "dead_letter_queue": {
+      "enabled": true,
+      "queue_name": "email_automation_dlq"
+    }
+  },
+  "monitoring": {
+    "enabled": true,
+    "alerts": [
+      {
+        "type": "email_failure",
+        "threshold": 0.05,
+        "window": "1h",
+        "action": "slack_notification"
+      },
+      {
+        "type": "provider_rate_limit",
+        "threshold": 0.8,
+        "action": "slack_notification"
+      }
+    ]
+  }
+}
