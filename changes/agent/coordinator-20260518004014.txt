@@ -1,0 +1,3 @@
+Automated agent branch agent/coordinator-20260518004014: Coordinator: Setup agent orchestration
+
+Creates PR templates, branch naming and CI checklist.
