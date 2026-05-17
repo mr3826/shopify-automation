@@ -1,0 +1,3 @@
+Automated agent branch agent/logging-pii-fix-20260518004041: Fix: logging and PII redaction
+
+Redact PII in logs and external notifications.
