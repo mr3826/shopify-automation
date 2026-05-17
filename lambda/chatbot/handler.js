@@ -362,16 +362,23 @@ If a customer seems frustrated, upset, or has a complex issue that requires huma
       }]
     };
 
-    await fetch(slackWebhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(notification)
-    });
+    try {
+      // Use shared ApiClient retry/timeout behavior via a small wrapper
+      const webhookClient = new ApiClient({ timeout: 5000, retries: 2, headers: { 'Content-Type': 'application/json' } });
+      await webhookClient.makeRequest(slackWebhookUrl, {
+        method: 'POST',
+        body: JSON.stringify(notification),
+        headers: { 'Content-Type': 'application/json' }
+      });
 
-    this.logger.info('Escalation notification sent', { 
-      conversationId: conversation.id,
-      customerEmail: conversation.customer_email 
-    });
+      this.logger.info('Escalation notification sent', { 
+        conversationId: conversation.id,
+        // Do not log raw customer email in success path to avoid PII leakage
+        customerEmailHash: conversation.customer_email ? conversation.customer_email.replace(/(.{2}).+(@.+)/, "$1***$2") : null
+      });
+    } catch (notifyErr) {
+      this.logger.warn('Failed to send escalation notification', { error: notifyErr.message });
+    }
   }
 }
 
@@ -386,13 +393,20 @@ class OpenAIClient extends ApiClient {
         'Content-Type': 'application/json'
       }
     });
+    if (!process.env.OPENAI_API_KEY) {
+      // Fail fast - OpenAI key required for production
+      console.warn('OPENAI_API_KEY not set. OpenAI calls will fail.');
+    }
   }
 
   async createChatCompletion(params) {
     const url = 'https://api.openai.com/v1/chat/completions';
     return await this.makeRequest(url, {
       method: 'POST',
-      body: JSON.stringify(params)
+      headers: this.config.headers,
+      body: JSON.stringify(params),
+      timeout: this.config.timeout,
+      retries: this.config.retries
     });
   }
 }
@@ -427,6 +441,7 @@ exports.handler = async (event, context) => {
 
     const processor = new ChatbotProcessor(correlationId);
     
+    const handlerStart = Date.now();
     const result = await PerformanceMonitor.measureAsync(
       () => processor.processMessage({
         sessionId,
@@ -439,13 +454,14 @@ exports.handler = async (event, context) => {
     );
 
     // Log successful automation
+    const executionTimeMs = Date.now() - handlerStart;
     await DatabaseHelper.logAutomation(
       'chatbot',
       'webhook',
       { sessionId, conversationId, messageLength: message.length },
       'success',
       `Successfully processed chatbot message`,
-      Date.now() - context.getRemainingTimeInMillis() + context.getRemainingTimeInMillis(),
+      executionTimeMs,
       correlationId
     );
 
