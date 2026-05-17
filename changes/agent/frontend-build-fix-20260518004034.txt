@@ -1,0 +1,3 @@
+Automated agent branch agent/frontend-build-fix-20260518004034: Fix: disable production sourcemaps
+
+Emit sourcemaps only in non-production builds.
