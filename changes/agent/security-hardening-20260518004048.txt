@@ -1,0 +1,3 @@
+Automated agent branch agent/security-hardening-20260518004048: Security: rate limits, CORS, SCA
+
+Audit rate limits, lock down CORS for production, add SCA.
